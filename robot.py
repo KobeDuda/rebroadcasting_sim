@@ -3,7 +3,7 @@ import math
 import copy
 
 BROADCAST_LIFETIME = 40
-BROADCAST_RANGE = 300.0
+BROADCAST_RANGE = 500.0
 
 OPERATOR_X = 1000
 OPERATOR_Y = 360
@@ -165,6 +165,16 @@ class Robot:
 
         if self.swarm_state[message.robot_id].last_message_id >= message.msg_id:
             return
+
+        # Suppress message if it is in buffer
+        indices_to_remove = []
+        for i, bc in enumerate(self.broadcast_buffer):
+            if bc.msg_id == message.msg_id:
+                print("SUPPRESSING")
+                indices_to_remove.append(i)
+        
+        for i in indices_to_remove:
+            self.broadcast_buffer.pop(i)
 
         self.swarm_state[message.robot_id].last_message_id = message.msg_id
 
