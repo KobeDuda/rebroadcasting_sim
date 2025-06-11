@@ -2,10 +2,11 @@ import random
 import math
 import copy
 
-BROADCAST_LIFETIME = 40
-BROADCAST_RANGE = 500.0
+BROADCAST_LIFETIME = 30
+BROADCAST_RANGE = 300.0
+RELAY_DELAY_FACTOR = 60
 
-OPERATOR_X = 1000
+OPERATOR_X = 550
 OPERATOR_Y = 360
 
 SWARM_SIZE = 7
@@ -31,32 +32,30 @@ class Broadcast:
         self.robot_id = robot_id
         self.msg_id = msg_id
         self.last_robot_id = last_robot_id
+        self.assign_rx_times()
 
+    def assign_rx_times(self):
         # Assign random times for all robots in range to receive 
         self.rx_times = []
         for robot in all_robots:
-            distance = math.sqrt((x - robot.x)**2 + (y - robot.y)**2)
+            distance = math.sqrt((self.x - robot.x)**2 + (self.y - robot.y)**2)
             if distance < BROADCAST_RANGE and distance > 0.0001:
                 # Time varies with distance
-                self.rx_times.append(int(distance / BROADCAST_RANGE * BROADCAST_LIFETIME + random.randint(0, int(BROADCAST_LIFETIME / 8))))
+                self.rx_times.append(int(0.8 * distance / BROADCAST_RANGE * BROADCAST_LIFETIME + random.randint(0, int(BROADCAST_LIFETIME / 8))))
             else:
                 self.rx_times.append(-1)
 
-    def tick(self) -> list:
-        new_broadcasts = []
-
+    def tick(self):
         # Robot receives message if the time is right
         for i in range(len(self.rx_times)):
             if self.rx_times[i] == self.age:
-                new_broadcasts.append(all_robots[i].receive_message(self))
+                all_robots[i].receive_message(self)
 
         self.age += 1
         if hasattr(self, 'color'):
             # Clamp alpha between 0 and 100
             alpha = max(0, min(100, 100 - (100 * self.age / BROADCAST_LIFETIME)))
             self.color[3] = alpha
-
-        return new_broadcasts
 
 class GPSBroadcast (Broadcast):
     def __init__(self, x: float, y: float, robot_id: int, msg_id: int, last_robot_id: int, location: tuple):
@@ -85,13 +84,19 @@ class RobotState:
 class Robot:
     def __init__(self, id: int, x: float, y: float):
         self.id = id
+        # Set random starting position within the previous movement bounds
         self.x = x
         self.y = y
         self.msg_count = 0
         self.broadcast_buffer = []
+        self.selected = False
+        self.ping_timer = 0
+        self.rebroadcast_ping_timer = 0
+        self.suppress_ping_timer = 0
 
-        self.destination_x = random.randint(100, 500)
-        self.destination_y = random.randint(100, 500)
+        # Comment out destination setting since we're not moving anymore
+        # self.destination_x = random.randint(100, 500)
+        # self.destination_y = random.randint(360-200, 360+200)
 
         self.swarm_state = []
         for i in range(SWARM_SIZE):
@@ -100,15 +105,15 @@ class Robot:
             )
 
     def tick(self):
-        dist = distance(self, (self.destination_x, self.destination_y))
-        if dist > 2.5:
-            self.x += (self.destination_x - self.x) / dist * 2
-            self.y += (self.destination_y - self.y) / dist * 2
+        # dist = distance(self, (self.destination_x, self.destination_y))
+        # if dist > 2.5:
+        #     self.x += (self.destination_x - self.x) / dist * 2
+        #     self.y += (self.destination_y - self.y) / dist * 2
 
-        # If the robot is close enough to the destination, set a new destination
-        if dist < 2.5:
-            self.destination_x = random.randint(100, 500)
-            self.destination_y = random.randint(100, 500)
+        # # If the robot is close enough to the destination, set a new destination
+        # if dist < 2.5:
+        #     self.destination_x = random.randint(100, 500)
+        #     self.destination_y = random.randint(360-200, 360+200)
         
         # Broadcast all messages in buffer after delay
         for bc in self.broadcast_buffer:
@@ -118,8 +123,22 @@ class Robot:
                 # Set position to the robot's position
                 bc.x = self.x
                 bc.y = self.y
+                bc.assign_rx_times()
                 Broadcast.all_broadcasts.update({bc.id: bc})
                 self.broadcast_buffer.remove(bc)
+
+                # If the source robot is selected, set rebroadcast ping timer
+                if all_robots[bc.robot_id].selected:
+                    self.rebroadcast_ping_timer = 10
+
+        if self.ping_timer > 0:
+            self.ping_timer -= 1
+
+        if self.rebroadcast_ping_timer > 0:
+            self.rebroadcast_ping_timer -= 1
+
+        if self.suppress_ping_timer > 0:
+            self.suppress_ping_timer -= 1
 
     def broadcast_gps(self) -> None:
         global all_robots
@@ -134,15 +153,11 @@ class Robot:
         Broadcast.all_broadcasts.update({new_bc.id: new_bc})
 
     def relay_gps(self, robot_id, msg_id, location) -> GPSBroadcast:
-        global relay_counter
-        if self.id == 0:
-            print("RELAYING:", relay_counter)
-            relay_counter += 1
-        
+
         new_bc = GPSBroadcast(self.x, self.y, robot_id, msg_id, self.id, location)
         self.broadcast_buffer.append(new_bc)
         # Make delay based on distance
-        delay = 20 * (1 - distance(self, all_robots[robot_id]) / BROADCAST_RANGE)
+        delay = RELAY_DELAY_FACTOR * (1 - distance(self, all_robots[robot_id]) / BROADCAST_RANGE)
         new_bc.delay = delay
         return new_bc
 
@@ -159,6 +174,19 @@ class Robot:
         return GreedyBroadcast(self.x, self.y, robot_id, msg_id, last_robot_id)
 
     def receive_message(self, message: Broadcast):
+        # Suppress message if it is in buffer, unless the message is about to be sent
+        indices_to_remove = []
+        for i, bc in enumerate(self.broadcast_buffer):
+            if bc.msg_id == message.msg_id and bc.robot_id == message.robot_id:
+                #if bc.delay >= 5:
+                    print("SUPPRESSING")
+                    indices_to_remove.append(i)
+                    if all_robots[message.robot_id].selected:
+                        self.suppress_ping_timer = 10
+
+        for i in indices_to_remove:
+            self.broadcast_buffer.pop(i)
+        
         # Ignore message conditions (either robot sent this message, or it has already been received)
         if message.robot_id == self.id:
             return
@@ -166,31 +194,25 @@ class Robot:
         if self.swarm_state[message.robot_id].last_message_id >= message.msg_id:
             return
 
-        # Suppress message if it is in buffer
-        indices_to_remove = []
-        for i, bc in enumerate(self.broadcast_buffer):
-            if bc.msg_id == message.msg_id:
-                print("SUPPRESSING")
-                indices_to_remove.append(i)
-        
-        for i in indices_to_remove:
-            self.broadcast_buffer.pop(i)
+        # If receiving a message from the selected robot, set pinged to true
+        if all_robots[message.robot_id].selected:
+            self.ping_timer = 10
 
         self.swarm_state[message.robot_id].last_message_id = message.msg_id
 
         # GPS message
         if isinstance(message, GPSBroadcast):        
             self.swarm_state[message.robot_id].gps_location = message.location
-            output = self.relay_gps(message.robot_id, message.msg_id, message.location)
-            return output
+            self.relay_gps(message.robot_id, message.msg_id, message.location)
+            return
 
         # Greedy algorithm
         if isinstance(message, GreedyBroadcast):
             last_robot = all_robots[message.last_robot_id]
             if distance(last_robot, (OPERATOR_X, OPERATOR_Y)) < distance(self, (OPERATOR_X, OPERATOR_Y)):
                 return
-            output = self.relay_greedy(message.robot_id, message.msg_id, self.id)            
-            return output
+            self.relay_greedy(message.robot_id, message.msg_id, self.id)            
+            return
 
 def distance(p1, p2) -> float:
     if isinstance(p1, tuple) or isinstance(p1, list):
